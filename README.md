@@ -1,5 +1,8 @@
 # RelayVault
 
+[![CI](https://github.com/ranjitmani61/relayvault/actions/workflows/ci.yml/badge.svg)](https://github.com/ranjitmani61/relayvault/actions/workflows/ci.yml)
+
+
 RelayVault stores redacted task checkpoints in a local SQLite WAL database and provides MCP, REST, and CLI interfaces for handing work between models. Detected secrets are replaced with stable workspace-specific tokens; their original values are encrypted in the local vault.
 
 ```text
