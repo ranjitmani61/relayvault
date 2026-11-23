@@ -1,0 +1,75 @@
+"""Synthetic regression corpus. These examples are not population accuracy estimates."""
+
+POSITIVE = [
+    ("unquoted-password-hash", "PASSWORD=abc#def", "abc#def"),
+    ("bearer-header", "Authorization: Bearer AbCd09._~+/=-", "AbCd09._~+/=-"),
+    ("lowercase-bearer", "authorization: bearer simple-test-credential", "simple-test-credential"),
+    ("basic-header", "Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="),
+    ("dotenv-password", "PASSWORD=hunter2", "hunter2"),
+    ("weak-password", 'password = "aaaaabbbbbcccccdddddeeeee"', "aaaaabbbbbcccccdddddeeeee"),
+    ("punctuated-password", "password='p@ss!word#2026'", "p@ss!word#2026"),
+    ("json-secret", '{"client_secret":"local-example-pass"}', "local-example-pass"),
+    ("prefixed-assignment", "DATABASE_PASSWORD=local-password", "local-password"),
+    ("yaml-key", "api_key: local-example-key", "local-example-key"),
+    (
+        "github-fine-grained",
+        "github_" + "pat_" + "AbCd0123456789_abcdefghij",
+        "github_" + "pat_" + "AbCd0123456789_abcdefghij",
+    ),
+    (
+        "github-classic",
+        "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+        "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+    ),
+    (
+        "stripe",
+        "sk_" + "live_" + "9876543210abcdefghij123456",
+        "sk_" + "live_" + "9876543210abcdefghij123456",
+    ),
+    (
+        "openai",
+        "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+        "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+    ),
+    (
+        "anthropic",
+        "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+        "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+    ),
+    ("google", "AIza" + "aZ09" * 8 + "xyz", "AIza" + "aZ09" * 8 + "xyz"),
+    ("aws", "AKIA1234567890ABCDEF", "AKIA1234567890ABCDEF"),
+    ("slack", "xoxb-1234567890-ABCDEFGHIJKL", "xoxb-1234567890-ABCDEFGHIJKL"),
+    (
+        "jwt",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmno12345",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmno12345",
+    ),
+    ("pem", "-----BEGIN PRIVATE KEY-----\nsynthetickey\n-----END PRIVATE KEY-----", "synthetickey"),
+    ("email", "Contact demo@example.org", "demo@example.org"),
+    ("ipv4-10", "http://10.0.0.1/path", "10.0.0.1"),
+    ("ipv4-172", "172.31.255.254", "172.31.255.254"),
+    ("ipv4-192", "192.168.0.1", "192.168.0.1"),
+    ("card", "4532015112830366", "4532015112830366"),
+    ("spaced-card", "4532 0151 1283 0366", "4532 0151 1283 0366"),
+]
+NEGATIVE = [
+    ("shell-brace-reference", "api_key = ${API_KEY}"),
+    ("invalid-ip", "10.999.999.999"),
+    ("invalid-ip-192", "192.168.300.1"),
+    ("public-ip", "8.8.8.8"),
+    ("public-172", "172.32.1.1"),
+    ("public-192", "192.169.1.1"),
+    ("version", "version 10.2"),
+    ("bad-luhn", "4532015112830367"),
+    ("zero-card", "0000000000000000"),
+    ("code-identifier", "token_count = 42"),
+    ("null-secret", "password = None"),
+    ("shell-reference", "api_key = $API_KEY"),
+    ("sha256", "a" * 64),
+    ("digits-in-hash", "abc4532015112830366def"),
+    ("ordinary-prose", "Implement retries with exponential backoff."),
+    ("short-number", "123456"),
+    ("label", "API_KEY is loaded from the environment."),
+]
+# Deliberately unsupported: keep visible in metrics instead of calling them true negatives.
+UNSUPPORTED = [("name", "Alice Johnson"), ("address", "123 Example Street")]

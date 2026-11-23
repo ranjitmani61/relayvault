@@ -1,17 +1,9 @@
 {
   "name": "io.github.ranjitmani61/relayvault",
-  "description": "Local encrypted checkpoint handoff and secret redaction server",
+  "description": "Source installation only; local encrypted task checkpoints and pattern redaction",
   "version": "0.1.0",
   "repository": {
     "url": "https://github.com/ranjitmani61/relayvault",
     "source": "github"
-  },
-  "packages": [
-    {
-      "registryType": "pypi",
-      "identifier": "relayvault",
-      "version": "0.1.0",
-      "transport": {"type": "stdio"}
-    }
-  ]
+  }
 }

@@ -1,14 +1,16 @@
-import hmac
-import os
 from typing import Any, Dict, List, Optional
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Security, status
-from fastapi.middleware.cors import CORSMiddleware
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Security, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
-from relayvault.engine import RelayVaultEngine
+from pydantic import BaseModel, ConfigDict, Field
+
+from relayvault.access import Principal, authenticate, verify_rehydration_key
+from relayvault.engine import IntegrityError, RelayVaultEngine
 
 app = FastAPI(
-    title="RelayVault Cross-Model State & Zero-Trust Redaction API",
+    title="RelayVault Task Checkpoints & Pattern Redaction API",
     version="0.1.0",
     description=(
         "Git-like task state checkpointing and reversible local PII/secret vault for seamless handoffs "
@@ -16,52 +18,85 @@ app = FastAPI(
     ),
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 security = HTTPBearer(auto_error=True)
 engine = RelayVaultEngine()
 
 
-def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security)) -> str:
-    expected_key = os.environ.get("RELAYVAULT_API_KEY")
-    if not expected_key:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="RELAYVAULT_API_KEY is not configured")
-    provided_key = credentials.credentials
-    if not hmac.compare_digest(provided_key.encode("utf-8"), expected_key.encode("utf-8")):
+def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security)) -> Principal:
+    try:
+        principal = authenticate(credentials.credentials)
+    except (RuntimeError, ValueError, OSError):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Bearer API Key",
-        )
-    return provided_key
+            status_code=503, detail="HTTP authentication is not configured correctly"
+        ) from None
+    if principal is None:
+        raise HTTPException(status_code=401, detail="Invalid Bearer API Key")
+    return principal
 
 
-class CommitCheckpointRequest(BaseModel):
+@app.exception_handler(PermissionError)
+async def permission_error(request, exc):
+    return JSONResponse(status_code=403, content={"detail": str(exc)})
+
+
+@app.exception_handler(ValueError)
+async def validation_error(request, exc):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(RequestValidationError)
+async def request_error(request, exc):
+    # Do not echo raw request values, which may contain credentials.
+    return JSONResponse(status_code=422, content={"detail": "Invalid request schema"})
+
+
+@app.exception_handler(IntegrityError)
+async def integrity_error(request, exc):
+    return JSONResponse(
+        status_code=409, content={"detail": "Vault integrity check failed; local recovery required"}
+    )
+
+
+class StrictRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class CommitCheckpointRequest(StrictRequest):
     workspace_id: str = Field(..., description="Unique project or repo identifier, e.g. 'payments-service'")
-    source_model: str = Field(..., description="Model creating the checkpoint, e.g. 'claude-opus-4.7' or 'gpt-5.5'")
+    source_model: str = Field(
+        ..., description="Model creating the checkpoint, e.g. 'claude-opus-4.7' or 'gpt-5.5'"
+    )
     objective: str = Field(..., description="Core task objective and exact problem statement")
-    locked_decisions: List[str] = Field(default_factory=list, description="Architectural choices already decided")
+    locked_decisions: List[str] = Field(
+        default_factory=list, description="Architectural choices already decided"
+    )
     failed_approaches: List[str] = Field(default_factory=list, description="Approaches tried and rejected")
-    artifacts: Dict[str, str] = Field(default_factory=dict, description="Map of filename/label to code or spec snippet")
-    next_steps: List[str] = Field(default_factory=list, description="Ordered list of immediate tasks for the next model")
+    artifacts: Dict[str, str] = Field(
+        default_factory=dict, description="Map of filename/label to code or spec snippet"
+    )
+    next_steps: List[str] = Field(
+        default_factory=list, description="Ordered list of immediate tasks for the next model"
+    )
     branch: str = Field(default="main", description="Task branch name")
     parent_hash: Optional[str] = Field(default=None, description="Optional parent checkpoint commit hash")
 
 
-class CheckoutHandoffRequest(BaseModel):
+class CheckoutHandoffRequest(StrictRequest):
     workspace_id: str = Field(..., description="Workspace identifier")
     branch: str = Field(default="main", description="Branch name")
-    commit_hash: Optional[str] = Field(default=None, description="Specific commit hash, or None for branch HEAD")
-    target_model: Optional[str] = Field(default=None, description="Model receiving the handoff, e.g. 'deepseek-v4' or 'gemini-3.1-pro'")
+    commit_hash: Optional[str] = Field(
+        default=None, description="Specific commit hash, or None for branch HEAD"
+    )
+    target_model: Optional[str] = Field(
+        default=None, description="Model receiving the handoff, e.g. 'deepseek-v4' or 'gemini-3.1-pro'"
+    )
 
 
-class RehydrateRequest(BaseModel):
+class RehydrateRequest(StrictRequest):
     workspace_id: str = Field(..., description="Workspace identifier")
-    text_with_vault_tokens: str = Field(..., description="Text or code containing <RV_VAULT:TYPE:HASH> tokens")
+    text_with_vault_tokens: str = Field(
+        ..., description="Text or code containing <RV_VAULT:TYPE:HASH> tokens"
+    )
 
 
 @app.get("/health")
@@ -70,7 +105,10 @@ def health_check() -> Dict[str, str]:
 
 
 @app.post("/v1/checkpoints/commit", dependencies=[Depends(verify_api_key)])
-def api_commit_checkpoint(req: CommitCheckpointRequest) -> Dict[str, Any]:
+def api_commit_checkpoint(
+    req: CommitCheckpointRequest, principal: Principal = Depends(verify_api_key)
+) -> Dict[str, Any]:
+    principal.authorize(req.workspace_id, "write")
     return engine.commit_checkpoint(
         workspace_id=req.workspace_id,
         source_model=req.source_model,
@@ -85,7 +123,10 @@ def api_commit_checkpoint(req: CommitCheckpointRequest) -> Dict[str, Any]:
 
 
 @app.post("/v1/checkpoints/checkout", dependencies=[Depends(verify_api_key)])
-def api_checkout_handoff(req: CheckoutHandoffRequest) -> Dict[str, Any]:
+def api_checkout_handoff(
+    req: CheckoutHandoffRequest, principal: Principal = Depends(verify_api_key)
+) -> Dict[str, Any]:
+    principal.authorize(req.workspace_id, "read")
     res = engine.checkout_handoff(
         workspace_id=req.workspace_id,
         branch=req.branch,
@@ -97,29 +138,19 @@ def api_checkout_handoff(req: CheckoutHandoffRequest) -> Dict[str, Any]:
     return res
 
 
-@app.post("/v1/vault/rehydrate", dependencies=[Depends(verify_api_key)])
+@app.post("/v1/vault/rehydrate", include_in_schema=False)
 def api_rehydrate_output(
     req: RehydrateRequest,
-    request: Request,
+    principal: Principal = Depends(verify_api_key),
     x_relayvault_local_intent: Optional[str] = Header(default=None),
     x_relayvault_rehydrate_key: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     if x_relayvault_local_intent != "rehydrate":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Explicit local rehydration intent is required")
-    rehydrate_key = os.environ.get("RELAYVAULT_REHYDRATE_KEY")
-    if rehydrate_key is not None:
-        if not rehydrate_key:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="RELAYVAULT_REHYDRATE_KEY must not be empty")
-        if x_relayvault_rehydrate_key is None or not hmac.compare_digest(
-            x_relayvault_rehydrate_key.encode("utf-8"), rehydrate_key.encode("utf-8")
-        ):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid rehydration key")
-    else:
-        proxy_headers = ("x-forwarded-for", "x-real-ip", "forwarded", "cf-connecting-ip", "true-client-ip", "x-client-ip")
-        if any(header in request.headers for header in proxy_headers):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Proxied requests require RELAYVAULT_REHYDRATE_KEY to be configured")
-        if request.client is None or request.client.host not in ("127.0.0.1", "::1", "testclient"):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Rehydration is restricted to loopback clients")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Explicit local rehydration intent is required"
+        )
+    principal.authorize(req.workspace_id, "read")
+    verify_rehydration_key(x_relayvault_rehydrate_key)
     restored, count = engine.rehydrate_text(req.workspace_id, req.text_with_vault_tokens)
     return {
         "workspace_id": req.workspace_id,
@@ -129,7 +160,13 @@ def api_rehydrate_output(
 
 
 @app.get("/v1/checkpoints/{workspace_id}", dependencies=[Depends(verify_api_key)])
-def api_list_checkpoints(workspace_id: str, branch: Optional[str] = None, limit: int = 20) -> Dict[str, Any]:
+def api_list_checkpoints(
+    workspace_id: str,
+    branch: Optional[str] = None,
+    limit: int = 20,
+    principal: Principal = Depends(verify_api_key),
+) -> Dict[str, Any]:
+    principal.authorize(workspace_id, "read")
     return {
         "workspace_id": workspace_id,
         "checkpoints": engine.list_checkpoints(workspace_id=workspace_id, branch=branch, limit=limit),
@@ -139,7 +176,7 @@ def api_list_checkpoints(workspace_id: str, branch: Optional[str] = None, limit:
 def get_universal_tool_schemas() -> Dict[str, Any]:
     """
     Exports native function-calling schemas compatible with:
-    1. OpenAI / DeepSeek / Moonshot (Kimi) / xAI (Grok) Chat Completions & Responses API
+    1. OpenAI / DeepSeek / Moonshot (Kimi) / xAI (Grok) Chat Completions API
     2. Anthropic Claude Messages API (tools input_schema)
     3. Google Gemini API (function_declarations)
     """

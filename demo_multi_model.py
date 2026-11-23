@@ -1,226 +1,136 @@
-"""
-End-to-End Verification & Multi-Model Handoff Demo for RelayVault.
-1. Starts the FastAPI REST server in-process via httpx.ASGITransport (zero network flake).
-2. Simulates Agent 1 (Claude Opus 4.7) hitting a 5-hour usage cap and committing a task checkpoint
-   containing sample Stripe/OpenAI credentials and an example customer email.
-3. Proves that RelayVault scrubs all secrets into deterministic <RV_VAULT:...> tokens before storage.
-4. Hands off the checkpoint to Agent 2 (Gemini 3.1 Pro / DeepSeek V4 / OpenAI).
-   - When RELAYVAULT_DEMO_LIVE=1, uses configured provider API keys for live calls.
-   - Always runs the full HTTP REST + SQLite Vault round-trip and verifies local secret rehydration.
+"""Deterministic synthetic handoff; opt-in live provider function-call contract.
+
+Default: actual MCP stdio producer -> actual REST consumer -> local restoration.
+Live: additionally sends tool schemas to a selected provider, dispatches its
+checkout call, returns the tool result and checks every expected token.
 """
 
 import asyncio
 import json
 import os
+import secrets
+import sys
 import tempfile
+
 import httpx
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+from relayvault.providers import run_contract
+from relayvault.redaction import TOKEN_RE
 
 
-async def call_live_openai_compatible(
-    api_key: str, base_url: str, model: str, handoff_prompt: str, tools: list
-) -> str:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            f"{base_url.rstrip('/')}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "Continue the engineering task from the RelayVault handoff. Preserve <RV_VAULT:...> tokens verbatim.",
-                    },
-                    {"role": "user", "content": handoff_prompt},
-                ],
-                "temperature": 0.1,
-            },
+async def main():
+    from relayvault.rest_api import app, engine, get_universal_tool_schemas
+
+    workspace = "demo-workspace"
+    api_key = secrets.token_urlsafe(32)
+    rehydrate_key = secrets.token_urlsafe(32)
+    os.environ["RELAYVAULT_API_KEY"] = api_key
+    os.environ["RELAYVAULT_REHYDRATE_KEY"] = rehydrate_key
+    os.environ["RELAYVAULT_WORKSPACES"] = json.dumps({workspace: ["read", "write"]})
+    os.environ.pop("RELAYVAULT_AUTH_FILE", None)
+    samples = [
+        "sk_" + "live_" + "9876543210abcdefghij123456",
+        "sk-proj-99887766554433221100aabbccddeeff",
+        "demo@example.org",
+        "10.42.19.88",
+    ]
+    original = (
+        "\n".join(
+            f"{name} = '{value}'"
+            for name, value in zip(["STRIPE_API_KEY", "OPENAI_API_KEY", "CONTACT", "HOST"], samples)
         )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
-
-
-async def call_live_anthropic(api_key: str, model: str, handoff_prompt: str) -> str:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": model,
-                "max_tokens": 600,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": (
-                            "Continue the engineering task from this RelayVault checkpoint. "
-                            "Write the Python webhook retry function preserving all <RV_VAULT:...> tokens verbatim:\n\n"
-                            + handoff_prompt
-                        ),
-                    }
-                ],
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["content"][0]["text"]
-
-
-async def call_live_gemini(api_key: str, model: str, handoff_prompt: str) -> str:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
-            json={
-                "contents": [
-                    {
-                        "parts": [
-                            {
-                                "text": (
-                                    "Continue the engineering task from this RelayVault checkpoint. "
-                                    "Write the Python webhook retry function preserving all <RV_VAULT:...> tokens verbatim:\n\n"
-                                    + handoff_prompt
-                                )
-                            }
-                        ]
-                    }
-                ]
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-
-
-async def main() -> None:
-    api_key = os.environ.setdefault("RELAYVAULT_API_KEY", "relayvault-demo-only-key")
+        + "\n"
+    )
+    params = StdioServerParameters(
+        command=sys.executable, args=["-m", "relayvault.mcp_server"], env=os.environ.copy()
+    )
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            names = {tool.name for tool in (await session.list_tools()).tools}
+            assert names == {
+                "relayvault_commit_checkpoint",
+                "relayvault_checkout_handoff",
+                "relayvault_list_history",
+            }
+            result = await session.call_tool(
+                "relayvault_commit_checkpoint",
+                arguments={
+                    "workspace_id": workspace,
+                    "source_model": "synthetic-model-a",
+                    "objective": "Implement retries",
+                    "locked_decisions": [],
+                    "failed_approaches": [],
+                    "artifacts": {"config.py": original},
+                    "next_steps": [],
+                },
+            )
+            assert not result.isError
+            commit = json.loads(result.content[0].text)
+            assert commit["redactions_applied"] == 4
+    print("[VERIFIED] MCP stdio producer committed 4 detected synthetic values.")
     headers = {"Authorization": f"Bearer {api_key}"}
-    rehydrate_headers = {**headers, "X-RelayVault-Local-Intent": "rehydrate"}
-    if "RELAYVAULT_REHYDRATE_KEY" in os.environ:
-        rehydrate_headers["X-RelayVault-Rehydrate-Key"] = os.environ["RELAYVAULT_REHYDRATE_KEY"]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as local:
 
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://relayvault.local") as client:
-        print("=== STEP 1: Verify Multi-Model Function-Calling Schemas (OpenAI/Claude/Gemini) ===")
-        schema_resp = await client.get("/v1/schemas/tools")
-        assert schema_resp.status_code == 200
-        schemas = schema_resp.json()
-        print("Exported schema families:", list(schemas.keys()))
+        async def dispatch(arguments):
+            response = await local.post("/v1/checkpoints/checkout", headers=headers, json=arguments)
+            response.raise_for_status()
+            return response.json()
 
-        print("\n=== STEP 2: Model A (Claude Opus 4.7) Commits Task State Before 5-Hour Cap ===")
-        raw_stripe_secret = "sk_" + "live_" + "51Nz9aBcDeFgHiJkLmNoPqRsTuVwXyZ012345"
-        raw_openai_secret = "sk-proj-99887766554433221100aabbccddeeff"
-        raw_email = "vip-billing-alerts@acme-corp.internal"
-        raw_ip = "10.42.19.88"
-
-        commit_payload = {
-            "workspace_id": "acme-billing-webhook",
-            "source_model": "claude-opus-4.7",
-            "objective": f"Fix idempotent retry handler for Stripe webhooks targeting internal node {raw_ip} and alerting {raw_email}.",
-            "locked_decisions": [
-                "Use exponential backoff with full jitter on HTTP 429 and 503.",
-                "Store idempotency keys in Redis with 24h TTL.",
-            ],
-            "failed_approaches": [
-                "Do NOT use synchronous time.sleep() inside the FastAPI event loop (caused worker starvation)."
-            ],
-            "artifacts": {
-                "config.py": (
-                    f"STRIPE_API_KEY = '{raw_stripe_secret}'\n"
-                    f"FALLBACK_LLM_KEY = '{raw_openai_secret}'\n"
-                    f"INTERNAL_WEBHOOK_HOST = 'http://{raw_ip}:8080/hooks'\n"
-                    f"ALERT_RECIPIENT = '{raw_email}'\n"
+        handoff = await dispatch({"workspace_id": workspace, "target_model": "synthetic-model-b"})
+        assert all(value not in json.dumps(handoff) for value in samples)
+        output = handoff["artifacts"]["config.py"]
+        expected = set(TOKEN_RE.findall(output))
+        assert len(expected) == 4
+        print("[VERIFIED] REST consumer received tokens; none of the 4 synthetic values leaked.")
+        if os.environ.get("RELAYVAULT_DEMO_LIVE") == "1":
+            required = ("RELAYVAULT_LIVE_PROVIDER", "RELAYVAULT_LIVE_MODEL", "RELAYVAULT_LIVE_API_KEY")
+            if any(not os.environ.get(name) for name in required):
+                raise ValueError(
+                    "Live mode requires RELAYVAULT_LIVE_PROVIDER, RELAYVAULT_LIVE_MODEL and RELAYVAULT_LIVE_API_KEY"
                 )
-            },
-            "next_steps": [
-                "Write async dispatch_webhook() using config.py constants without exposing raw credentials."
-            ],
-            "branch": "main",
-        }
-
-        commit_resp = await client.post("/v1/checkpoints/commit", headers=headers, json=commit_payload)
-        assert commit_resp.status_code == 200, commit_resp.text
-        commit_data = commit_resp.json()
-        print(json.dumps(commit_data, indent=2))
-        assert commit_data["redactions_applied"] == 6, "Expected all 6 secret/PII occurrences to be vaulted!"
-
-        print("\n=== STEP 3: Model B (DeepSeek V4 Pro / Gemini 3.1 Pro) Checks Out Redacted Handoff ===")
-        checkout_resp = await client.post(
-            "/v1/checkpoints/checkout",
-            headers=headers,
-            json={"workspace_id": "acme-billing-webhook", "branch": "main", "target_model": "deepseek-v4-pro"},
-        )
-        assert checkout_resp.status_code == 200
-        handoff = checkout_resp.json()
-        handoff_prompt = handoff["synthesized_handoff_prompt"]
-        print(handoff_prompt)
-
-        # Guarantee zero raw secrets exist in the handoff payload sent to Model B
-        assert raw_stripe_secret not in handoff_prompt
-        assert raw_openai_secret not in handoff_prompt
-        assert raw_email not in handoff_prompt
-        assert raw_ip not in handoff_prompt
-        print("\n[VERIFIED] Zero raw secrets or PII exist in the cross-model handoff payload.")
-
-        # Execute live calls if provider API keys are configured in environment
-        live_outputs = []
-        if os.environ.get("RELAYVAULT_DEMO_LIVE") == "1" and os.environ.get("ANTHROPIC_API_KEY"):
-            out = await call_live_anthropic(os.environ["ANTHROPIC_API_KEY"], "claude-3-7-sonnet-latest", handoff_prompt)
-            live_outputs.append(("Anthropic Claude", out))
-        if os.environ.get("RELAYVAULT_DEMO_LIVE") == "1" and os.environ.get("GEMINI_API_KEY"):
-            out = await call_live_gemini(os.environ["GEMINI_API_KEY"], "gemini-2.5-flash", handoff_prompt)
-            live_outputs.append(("Google Gemini", out))
-        if os.environ.get("RELAYVAULT_DEMO_LIVE") == "1" and os.environ.get("OPENAI_API_KEY"):
-            out = await call_live_openai_compatible(
-                os.environ["OPENAI_API_KEY"], "https://api.openai.com/v1", "gpt-4o-mini", handoff_prompt, schemas["openai_deepseek_kimi_grok"]
+            output = await run_contract(
+                *(os.environ[name] for name in required),
+                workspace,
+                get_universal_tool_schemas(),
+                dispatch,
+                expected,
             )
-            live_outputs.append(("OpenAI", out))
-        if os.environ.get("RELAYVAULT_DEMO_LIVE") == "1" and os.environ.get("DEEPSEEK_API_KEY"):
-            out = await call_live_openai_compatible(
-                os.environ["DEEPSEEK_API_KEY"], "https://api.deepseek.com/v1", "deepseek-chat", handoff_prompt, schemas["openai_deepseek_kimi_grok"]
-            )
-            live_outputs.append(("DeepSeek", out))
-
-        if live_outputs:
-            for provider_name, model_code in live_outputs:
-                print(f"\n=== Live Output from {provider_name} (Using Vault Tokens) ===\n{model_code[:400]}...")
-                rehydrate_resp = await client.post(
-                    "/v1/vault/rehydrate",
-                    headers=rehydrate_headers,
-                    json={"workspace_id": "acme-billing-webhook", "text_with_vault_tokens": model_code},
-                )
-                rehydrated = rehydrate_resp.json()
-                print(f"[{provider_name}] Rehydrated {rehydrated['tokens_rehydrated']} vaulted secrets locally.")
+            print("[VERIFIED] Live provider issued a checkout call and preserved all expected tokens.")
         else:
-            # Deterministic verification of Model B output containing the vaulted tokens from config.py
-            redacted_config_artifact = handoff["artifacts"]["config.py"]
-            model_b_generated_code = (
-                "import httpx\n\n"
-                + redacted_config_artifact
-                + "\nasync def dispatch_webhook(payload: dict):\n"
-                + "    async with httpx.AsyncClient() as c:\n"
-                + "        return await c.post(INTERNAL_WEBHOOK_HOST, headers={'Authorization': f'Bearer {STRIPE_API_KEY}'}, json=payload)\n"
-            )
-            print("\n=== STEP 4: Local Rehydration of Model B Output ===")
-            rehydrate_resp = await client.post(
-                "/v1/vault/rehydrate",
-                headers=rehydrate_headers,
-                json={"workspace_id": "acme-billing-webhook", "text_with_vault_tokens": model_b_generated_code},
-            )
-            assert rehydrate_resp.status_code == 200
-            rehydrated_data = rehydrate_resp.json()
-            print(f"Tokens Rehydrated Locally: {rehydrated_data['tokens_rehydrated']}")
-            print("Final Rehydrated Code Ready for Local Execution:\n")
-            print(rehydrated_data["rehydrated_text"])
-            assert raw_stripe_secret in rehydrated_data["rehydrated_text"]
-            assert raw_openai_secret in rehydrated_data["rehydrated_text"]
-            assert raw_email in rehydrated_data["rehydrated_text"]
-            assert raw_ip in rehydrated_data["rehydrated_text"]
-            print("[VERIFIED] Local rehydration restored all 4 sample values accurately.")
+            print("[LOCAL ONLY] No external model called; provider contract was not exercised.")
+        response = await local.post(
+            "/v1/vault/rehydrate",
+            headers={
+                **headers,
+                "X-RelayVault-Local-Intent": "rehydrate",
+                "X-RelayVault-Rehydrate-Key": rehydrate_key,
+            },
+            json={"workspace_id": workspace, "text_with_vault_tokens": output},
+        )
+        response.raise_for_status()
+        restored = response.json()
+        assert restored["tokens_rehydrated"] == 4
+        assert all(value in restored["rehydrated_text"] for value in samples)
+        if os.environ.get("RELAYVAULT_DEMO_LIVE") != "1":
+            assert restored["rehydrated_text"] == original
+        engine.verify_all()
+        print(
+            "[VERIFIED] Separate-key local rehydration restored all 4 synthetic values; vault integrity passed."
+        )
 
 
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory(prefix="relayvault-demo-") as directory:
         os.environ["RELAYVAULT_HOME"] = directory
-        from relayvault.rest_api import app, engine, get_universal_tool_schemas
-
+        # Demo isolation: never inherit access or detector policy from a personal server.
+        for name in (
+            "RELAYVAULT_ALLOW_AGENT_REHYDRATE",
+            "RELAYVAULT_REDACTION_POLICY",
+            "RELAYVAULT_DETECTORS_FILE",
+            "RELAYVAULT_SALT",
+        ):
+            os.environ.pop(name, None)
         asyncio.run(main())

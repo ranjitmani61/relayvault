@@ -25,15 +25,17 @@ The boundary protects the **outgoing redacted handoff** to Model B, not plaintex
 
 ## Install and quickstart
 
-Python 3.10 or later is required. From the repository root:
+Python 3.11 or later is required. Installation is currently from source; no PyPI publication is claimed. Existing vaults require the explicit [v2 migration](docs/SECURITY.md#legacy-migration). From the repository root:
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -e . pytest pytest-asyncio
+pip install --require-hashes -r requirements-dev.lock
+pip install --no-deps --no-build-isolation -e .
 
 # Choose a long random value; keep it outside source control.
-export RELAYVAULT_API_KEY='replace-with-a-long-random-local-api-key'
+export RELAYVAULT_API_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export RELAYVAULT_WORKSPACES='{"example":["read","write"]}'
 relayvault serve-api --host 127.0.0.1 --port 8000
 ```
 
@@ -107,7 +109,7 @@ See [Cursor's MCP configuration](https://cursor.com/docs/mcp). Do not set `RELAY
 
 ## REST and provider function calling
 
-Run RelayVault locally as shown in Quickstart. The `/v1/schemas/tools` response contains two safe function definitions for `openai_deepseek_kimi_grok`, `anthropic_claude`, and `google_gemini`; it never contains a rehydration function. The following examples send a **new request to an external provider**, may incur charges, and require that provider's credentials and access to a compatible model. Use only reviewed, redacted content.
+Run RelayVault locally as shown in Quickstart. The `/v1/schemas/tools` response contains two model-facing function definitions for `openai_deepseek_kimi_grok`, `anthropic_claude`, and `google_gemini`; it never contains a rehydration function. The following examples send a **new request to an external provider**, may incur charges, and require that provider's credentials and access to a compatible model. Use only reviewed, redacted content.
 
 ### OpenAI, DeepSeek, and Kimi: Chat Completions
 
@@ -184,34 +186,110 @@ PY
 
 See the [Gemini function declaration reference](https://ai.google.dev/api/generate-content) for provider schema and response details. Provider model availability and supported schemas can change; test the integration against your selected model before deployment.
 
+## HTTP authentication and workspace permissions
+
+Stdio trusts the OS user running the server. Both HTTP MCP transports and REST require explicit workspace grants. For a single client use the Quickstart environment above; for multiple clients set `RELAYVAULT_AUTH_FILE` to a private 0600 JSON file:
+
+```json
+{
+  "coding-agent": {
+    "key": "replace-with-a-unique-random-agent-key",
+    "workspaces": {"example": ["read", "write"]}
+  },
+  "reviewer": {
+    "key": "replace-with-another-random-key",
+    "workspaces": {"example": ["read"]}
+  }
+}
+```
+
+This file takes precedence over `RELAYVAULT_API_KEY` / `RELAYVAULT_WORKSPACES`. Wildcard workspaces are not accepted. Send the selected client's key as `Authorization: Bearer ...`. For HTTP MCP, use `relayvault serve-mcp --transport streamable-http --port 8090` (`/mcp`), or legacy `--transport sse` (`/sse`). These listeners bind to localhost; expose them through an authenticated TLS deployment only after configuring network controls. Clients must support explicitly supplied bearer headers; RelayVault is not an OAuth authorization server.
+
+REST rehydration is disabled until a **different** `RELAYVAULT_REHYDRATE_KEY` is configured. It requires the ordinary credential, workspace read permission and both additional headers, even on loopback:
+
+```bash
+# Set on the trusted server and rehydration host; do not give it to the agent.
+export RELAYVAULT_REHYDRATE_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+# Restart the server with this environment, then send a local restoration request:
+curl -sS http://127.0.0.1:8000/v1/vault/rehydrate \
+  -H "Authorization: Bearer $RELAYVAULT_API_KEY" \
+  -H 'X-RelayVault-Local-Intent: rehydrate' \
+  -H "X-RelayVault-Rehydrate-Key: $RELAYVAULT_REHYDRATE_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"example","text_with_vault_tokens":"paste the exact vaulted output here"}'
+```
+
+The endpoint is absent from OpenAPI/tool schemas. **Proxy deployments require the separate rehydration key**, just like local deployments; client addresses and forwarding headers never grant decryption privileges.
+
+## Detection preview and local review
+
+The default `block-uncertain` policy rejects unclassified high-entropy credential-like strings. Review mode also withholds checkpoint exports until a trusted local review:
+
+```bash
+export RELAYVAULT_REDACTION_POLICY=review
+relayvault preview-file --workspace example --file config.py
+relayvault dehydrate-file --workspace example --file config.py --in-place --reviewed
+# After an MCP/REST commit, use the returned commit hash:
+relayvault inspect-checkpoint --workspace example --commit COMMIT_HASH
+relayvault approve-checkpoint --workspace example --commit COMMIT_HASH --reviewed
+```
+
+Review the actual output for unstructured PII and unexpected credentials before approving. There is no model-facing approval tool. Optional `RELAYVAULT_DETECTORS_FILE` points to trusted JSON such as `[{"name":"EMPLOYEE_ID","pattern":"EMP-[0-9]{6}"}]`; add bounded patterns and regression cases for your domain.
+
 ## CLI reference
 
 | Command | Purpose and options |
 | --- | --- |
-| `relayvault serve-mcp [--transport stdio\|sse\|streamable-http] [--port 8090] [--allow-agent-rehydrate]` | Start MCP; stdio is the default. The final flag exposes plaintext rehydration to the connected agent. |
-| `relayvault serve-api [--host 127.0.0.1] [--port 8000]` | Start the authenticated REST server. |
-| `relayvault dehydrate-file --workspace ID --file PATH [--in-place]` | Vault detected secrets in a UTF-8 file; write scrubbed text to stdout or overwrite the file. |
-| `relayvault rehydrate-file --workspace ID --file PATH [--in-place]` | Restore tokens from that workspace to stdout or overwrite the UTF-8 file. |
-| `relayvault log --workspace ID [--branch BRANCH]` | Print checkpoint history as JSON. |
+| `serve-mcp [--transport stdio\|sse\|streamable-http] [--port 8090] [--allow-agent-rehydrate]` | MCP; stdio default. HTTP requires bearer keys and workspace grants. Plaintext opt-in is stdio-only. |
+| `serve-api [--host 127.0.0.1] [--port 8000]` | REST; requires bearer keys and workspace grants. |
+| `preview-file --workspace ID --file PATH` | Display detected spans as preview markers and an uncertainty count without vaulting the file. |
+| `dehydrate-file --workspace ID --file PATH [--in-place] [--reviewed]` | Vault detected values; review policy requires explicit local review. |
+| `rehydrate-file --workspace ID --file PATH [--in-place] [--allow-partial]` | Restore tokens; unresolved/malformed tokens fail by default. |
+| `log --workspace ID [--branch BRANCH]` | Integrity-checked, redacted history. |
+| `inspect-checkpoint --workspace ID --commit HASH` | Trusted local preview of a pending checkpoint. |
+| `approve-checkpoint --workspace ID --commit HASH --reviewed` | Approve that exact reviewed checkpoint for export. |
+| `verify-vault` | Verify every record, checkpoint, head and lineage. |
+| `backup --destination NEW_DIR` | Consistent SQLite snapshot with key and salt configuration. |
+| `restore --source BACKUP_DIR --destination NEW_DIR` | Verify and restore into a new home. |
+| `rotate-key --destination NEW_DIR` | Reencrypt into a new home; preserve tokens and checkpoint IDs. |
+| `migrate-vault --destination NEW_DIR` | Explicit legacy migration; preserve old token recovery and require local checkpoint reviews. |
 
-Both file commands preserve UTF-8 bytes and line endings on a successful round trip. In-place rehydration writes plaintext to disk. `relayvault-mcp` is a stdio-only entry point; it also accepts `--allow-agent-rehydrate`. Run any command with `--help` for details.
+Prefix commands with `relayvault`. File commands support UTF-8 and preserve original bytes/line endings on successful round trips. Atomic in-place rehydration writes a 0600 plaintext file. `relayvault-mcp` is the stdio entry point. Stop clients before maintenance/cutover and update their `RELAYVAULT_HOME` together; maintenance commands never overwrite the source or an existing destination.
 
 ## Security model & limitations
 
-- **Detected patterns:** structured OpenAI, Anthropic, Google, AWS, GitHub, Slack, and Stripe keys; some quoted high-entropy secret/password/token assignments; JWTs; PEM private-key blocks; email addresses; private IPv4 patterns; and Luhn-valid credit-card numbers. String keys and values in nested dictionaries are scanned. These are pattern checks, not comprehensive classifiers.
-- **Not detected reliably:** unstructured prose PII such as human names and street addresses, which would require additional detection such as a NER model. Unrecognized credentials and fields used as identifiers may also remain plaintext. Review handoffs before sending them externally.
-- **Key and backups:** `master.key` is created with owner-only permissions (0600) in `RELAYVAULT_HOME`. Back up the key, `relayvault.db`, and any custom `RELAYVAULT_SALT` together, using a consistent SQLite backup that accounts for WAL. Losing the key or changing the salt prevents rehydration. Protect backups separately from the database. Vaults from the original hard-coded-key version require an explicit migration.
-- **REST rehydration:** `/v1/vault/rehydrate` requires the Bearer API key and `X-RelayVault-Local-Intent: rehydrate`. Set a distinct, nonempty `RELAYVAULT_REHYDRATE_KEY` and send it as `X-RelayVault-Rehydrate-Key` to authorize rehydration independently. When unset, only loopback clients without recognized forwarding headers are accepted. An empty configured key fails closed. **Proxy deployments require the separate rehydration key**: proxies may strip or use unrecognized headers, or alter the reported client address. Restrict network access and trusted proxy settings as well; the header check is not a substitute for proxy authentication.
-- **Agent access:** MCP rehydration is off by default. `RELAYVAULT_ALLOW_AGENT_REHYDRATE=1` or `--allow-agent-rehydrate` enables it and gives that MCP client access to plaintext secrets. Use only with fully trusted clients; keep this option disabled for model-facing tools.
-- **At rest:** the vault encrypts detected values, not the entire database or filesystem. Deterministic truncated token hashes reveal equality and may permit guessing low-entropy values. Plaintext can still exist in inputs, rehydrated files, application memory, logs, and backups; an attacker with the master key can decrypt the vault.
+- **Caught patterns:** structured API keys, contextual bearer/basic credentials, quoted/unquoted secret assignments, JWTs, PEM private keys, emails, validated private IPv4s and Luhn-valid card candidates. Nested dictionary keys and values are scanned; sensitive identifier fields are rejected. Detection remains heuristic.
+- **Not comprehensively caught:** prose PII such as human names and street addresses without additional NER, encoded or fragmented credentials, unknown secret formats and arbitrary low-entropy values. Zero detections do not establish safety. A curated corpus is not a real-world accuracy score.
+- **Local secrets:** v2 tokens use a secret HMAC key with 128-bit identifiers. Fernet authenticates values together with their record identity. Checkpoint/head HMACs detect modifications; whole-database rollback and deletion require external protections.
+- **Keys and backups:** keep `master.key`, `relayvault.db` and `vault-config.json` (including any custom salt) together. Use `backup` for a consistent WAL snapshot, restrict access and protect backups separately. Existing ownership and permissions are checked. Lost keys cannot be recovered.
+- **Prompt injection:** handoffs are untrusted task data with self-reported provenance. Review and host-enforced tool permissions remain necessary. Prompt wording cannot establish a security boundary.
+- **OS boundary:** an agent with the vault owner's shell/filesystem access can decrypt secrets. Use a separate account/host and scoped HTTP credentials to isolate such an agent; do not give it the master or rehydration key.
 
-`server.json` is local registry metadata; its presence does not establish that a package or registry entry has been published.
+Read the full [security model, migration and recovery guide](docs/SECURITY.md) before deployment. `server.json` is source metadata only; no unverified package is advertised. See [release verification](docs/RELEASE.md).
 
-## Verify
+## Verify and measure
 
 ```bash
 pytest -v
 python demo_multi_model.py
+python scripts/redaction_report.py
+ruff check .
+ruff format --check .
+pip-audit --require-hashes -r requirements.lock
+python -m build
 ```
 
-The demo uses temporary data and runs locally by default. It contacts configured providers only when `RELAYVAULT_DEMO_LIVE=1` is explicitly set; those calls may incur charges and send the redacted handoff externally. CI is configured for Python 3.11 and 3.12 on Ubuntu and macOS.
+The default demo runs an actual MCP stdio producer, REST consumer and separate-key restoration with synthetic data in a temporary vault. It calls no external model. CI checks Python 3.11/3.12 on Ubuntu/macOS, lint, corpus, demo, wheel installation and dependency vulnerabilities. Hash-pinned runtime/development lockfiles support reproducible installation; see the release guide to regenerate them.
+
+To test an actual provider, choose `openai`, `deepseek`, `kimi`, `anthropic` or `gemini`, supply a model available to your account and explicitly enable the live contract:
+
+```bash
+export RELAYVAULT_LIVE_PROVIDER=deepseek
+export RELAYVAULT_LIVE_MODEL='your-supported-tool-calling-model'
+export RELAYVAULT_LIVE_API_KEY="$DEEPSEEK_API_KEY"
+RELAYVAULT_DEMO_LIVE=1 python demo_multi_model.py
+# Or run the opt-in pytest contract:
+RELAYVAULT_LIVE_TESTS=1 pytest -v -m live
+```
+
+This sends synthetic scrubbed data to the chosen provider and may incur charges. The runner sends real tool definitions, requires a checkout call, validates its workspace/name/arguments, dispatches through REST, returns the tool result and checks all expected tokens before local restoration. It fails if tokens are missing, changed or invented. The normal test suite uses a local simulated provider for wire-format tests and explicitly skips the live contract. Passing local tests is not proof of live provider interoperability or user adoption.
