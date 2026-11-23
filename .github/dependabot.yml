@@ -4,6 +4,11 @@ updates:
     directory: '/'
     schedule:
       interval: weekly
+    # This file only redirects pip to requirements.lock; Dependabot's updater
+    # cannot resolve that .lock target from its temporary requirements tree.
+    # Track pyproject.toml here; maintain both hash-pinned locks deliberately.
+    exclude-paths:
+      - requirements.txt
   - package-ecosystem: github-actions
     directory: '/'
     schedule:
