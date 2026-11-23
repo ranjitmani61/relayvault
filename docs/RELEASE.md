@@ -20,9 +20,9 @@ For product validation, recruit users with a concrete handoff workflow and measu
 
 ## MCP Registry submission
 
-The `server.json` manifest advertises the verified PyPI package `relayvault==0.2.0`, with `uvx` and the `serve-mcp` CLI argument over stdio. The PyPI README contains the matching `mcp-name` ownership marker. This is registry preparation, not proof of a live registry listing.
+The `server.json` manifest advertises the verified PyPI package `relayvault==0.2.0`, with `uvx` and the `serve-mcp` CLI argument over stdio. The PyPI README contains the matching `mcp-name` ownership marker. Version `0.2.0` was [published in the official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers/io.github.ranjitmani61%2Frelayvault/versions/0.2.0) on 2026-11-23 and its public registry record was verified as `active` and `isLatest: true`.
 
-On a trusted machine, install the official `mcp-publisher` CLI, then run these as distinct steps:
+For a future version, on a trusted machine install the official `mcp-publisher` CLI, then run these as distinct steps:
 
 ```bash
 mcp-publisher validate
