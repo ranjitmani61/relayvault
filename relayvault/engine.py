@@ -44,7 +44,7 @@ class RelayVaultEngine:
             # Legacy databases may have 0644 under a private home. Migration fixes those permissions.
             if db.is_symlink() or not db.is_file():
                 raise IntegrityError("Database must be a regular file")
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=15.0) as conn:
                 tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 initialized = "vault_meta" in tables
                 populated = any(
@@ -98,16 +98,32 @@ class RelayVaultEngine:
         conn = sqlite3.connect(self.db_path, timeout=15.0)
         conn.row_factory = sqlite3.Row
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=15000")
             conn.execute("PRAGMA foreign_keys=ON")
             with conn:
                 yield conn
         finally:
             conn.close()
 
+    def _enable_wal(self):
+        deadline = time.monotonic() + 15.0
+        while True:
+            try:
+                with self._connect() as conn:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                return
+            except sqlite3.OperationalError as exc:
+                msg = str(exc).lower()
+                if ("locked" not in msg and "busy" not in msg) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
+
     def _init_db(self):
+        self._enable_wal()
         with self._connect() as conn:
-            conn.executescript("""
+            conn.execute("BEGIN IMMEDIATE")
+            for stmt in (
+                """
                 CREATE TABLE IF NOT EXISTS checkpoints (
                     commit_hash TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, branch TEXT NOT NULL,
                     parent_hash TEXT, source_model TEXT NOT NULL, objective TEXT NOT NULL,
@@ -116,19 +132,24 @@ class RelayVaultEngine:
                     redaction_count INTEGER NOT NULL, created_at REAL NOT NULL,
                     review_required INTEGER NOT NULL DEFAULT 0, reviewed INTEGER NOT NULL DEFAULT 0,
                     integrity_mac TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_workspace_branch ON checkpoints(workspace_id, branch);
+                )
+                """,
+                "CREATE INDEX IF NOT EXISTS idx_workspace_branch ON checkpoints(workspace_id, branch)",
+                """
                 CREATE TABLE IF NOT EXISTS secret_vault (
                     token_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, secret_type TEXT NOT NULL,
                     raw_value TEXT NOT NULL, created_at REAL NOT NULL
-                );
+                )
+                """,
+                """
                 CREATE TABLE IF NOT EXISTS branch_heads (
                     workspace_id TEXT NOT NULL, branch TEXT NOT NULL, commit_hash TEXT NOT NULL,
                     integrity_mac TEXT NOT NULL, PRIMARY KEY(workspace_id, branch)
-                );
-                CREATE TABLE IF NOT EXISTS vault_meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);
-            """)
-            conn.execute("BEGIN IMMEDIATE")
+                )
+                """,
+                "CREATE TABLE IF NOT EXISTS vault_meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            ):
+                conn.execute(stmt)
             row = conn.execute("SELECT value FROM vault_meta WHERE name='keys-v2'").fetchone()
             if row:
                 try:
