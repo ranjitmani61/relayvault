@@ -27,13 +27,12 @@ The boundary protects the **outgoing redacted handoff** to Model B, not plaintex
 
 ## Install and quickstart
 
-Python 3.11 or later is required. Installation is currently from source; no PyPI publication is claimed. Existing vaults require the explicit [v2 migration](docs/SECURITY.md#legacy-migration). From the repository root:
+Python 3.11 or later is required. RelayVault **0.2.0** is available on [PyPI](https://pypi.org/project/relayvault/0.2.0/). Existing vaults require the explicit [v2 migration](docs/SECURITY.md#legacy-migration). For a clean installation:
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install --require-hashes -r requirements-dev.lock
-pip install --no-deps --no-build-isolation -e .
+python -m pip install "relayvault==0.2.0"
 
 # Choose a long random value; keep it outside source control.
 export RELAYVAULT_API_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
@@ -55,13 +54,20 @@ curl -sS -X POST http://127.0.0.1:8000/v1/checkpoints/checkout \
 
 The server also exposes `/openapi.json`, `/docs`, and `/v1/schemas/tools`. `RELAYVAULT_HOME` selects the data directory; the default is `~/.relayvault`. All clients that need to share a vault must use the same home and salt.
 
+For development from a cloned repository, use the hash-pinned dependencies and editable install instead of the PyPI installation command:
+
+```bash
+python -m pip install --require-hashes -r requirements-dev.lock
+python -m pip install --no-deps --no-build-isolation -e .
+```
+
 ## Connect MCP clients
 
 These examples run the server locally over stdio. By default the available tools are `relayvault_commit_checkpoint`, `relayvault_checkout_handoff`, and `relayvault_list_history`; agent rehydration is disabled. The CLI and REST examples below do not require an MCP client.
 
 ### Claude Code
 
-From the repository root, use an absolute executable path so the server does not depend on the client's PATH. Set a shared vault home explicitly:
+From the directory containing your `.venv`, use an absolute executable path so the server does not depend on the client's PATH. Set a shared vault home explicitly:
 
 ```bash
 claude mcp add --transport stdio \
