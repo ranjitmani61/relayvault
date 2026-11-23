@@ -66,7 +66,22 @@ python -m pip install --no-deps --no-build-isolation -e .
 
 These examples run the server locally over stdio. By default the available tools are `relayvault_commit_checkpoint`, `relayvault_checkout_handoff`, and `relayvault_list_history`; agent rehydration is disabled. The CLI and REST examples below do not require an MCP client.
 
-### Claude Code
+### Quick setup with `uvx` (Claude Code)
+
+If [uv](https://docs.astral.sh/uv/) (which provides `uvx`) and Claude Code are already installed, connect the published PyPI package without creating a project virtual environment. On macOS or Linux, first ensure the shared vault directory is owner-only:
+
+```bash
+mkdir -p "$HOME/.relayvault"
+chmod 700 "$HOME/.relayvault"
+claude mcp add --transport stdio \
+  --env "RELAYVAULT_HOME=$HOME/.relayvault" \
+  relayvault -- uvx --from relayvault==0.2.0 relayvault serve-mcp
+claude mcp get relayvault
+```
+
+`uvx` installs or reuses the specified `relayvault==0.2.0` package when the MCP client launches the local stdio server. This matches the `uvx` runtime and `serve-mcp` argument advertised in [`server.json`](server.json). For other MCP clients, configure `command` as `uvx` and `args` as `["--from", "relayvault==0.2.0", "relayvault", "serve-mcp"]`. Set `RELAYVAULT_HOME` to an owner-only directory outside the project; agents with shell access to the vault owner's files can still access its local secrets (see [security limitations](docs/SECURITY.md)).
+
+### Claude Code (project virtualenv alternative)
 
 From the directory containing your `.venv`, use an absolute executable path so the server does not depend on the client's PATH. Set a shared vault home explicitly:
 
