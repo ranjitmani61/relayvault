@@ -16,6 +16,12 @@ pip-compile pyproject.toml --generate-hashes --strip-extras -o requirements.lock
 pip-compile pyproject.toml --extra dev --generate-hashes --strip-extras --allow-unsafe -c requirements.lock -o requirements-dev.lock
 ```
 
+Dependabot's `pip` update scan excludes the convenience `requirements.txt` shim, because its
+`-r requirements.lock` reference fails to resolve in Dependabot's temporary directory.
+It still scans `pyproject.toml`. After dependency version changes, regenerate **both**
+hash-pinned lockfiles with the commands above, run the CI/audit suite, and review the
+dependency diff before merging. Do not disable hash verification to make bot PRs pass.
+
 For product validation, recruit users with a concrete handoff workflow and measure setup time, detector misses/false positives on consented workloads, cross-client task completion, and recovery success. These outcomes cannot be established by adding more synthetic unit tests.
 
 ## MCP Registry submission
