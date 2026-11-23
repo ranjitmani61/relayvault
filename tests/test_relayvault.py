@@ -542,7 +542,8 @@ def test_manifest_and_demo(tmp_path):
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     assert manifest["version"] == project["project"]["version"] == "0.2.0"
     assert "mcp-name: io.github.ranjitmani61/relayvault" in (ROOT / "README.md").read_text()
-    assert manifest["$schema"] == "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json"
+    schema_url = "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json"
+    assert manifest["$schema"] == schema_url
     assert manifest["name"] == "io.github.ranjitmani61/relayvault"
     assert manifest["repository"]["url"] == "https://github.com/ranjitmani61/relayvault"
     assert len(manifest["packages"]) == 1
