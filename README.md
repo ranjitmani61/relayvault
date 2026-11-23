@@ -273,7 +273,7 @@ Prefix commands with `relayvault`. File commands support UTF-8 and preserve orig
 - **Prompt injection:** handoffs are untrusted task data with self-reported provenance. Review and host-enforced tool permissions remain necessary. Prompt wording cannot establish a security boundary.
 - **OS boundary:** an agent with the vault owner's shell/filesystem access can decrypt secrets. Use a separate account/host and scoped HTTP credentials to isolate such an agent; do not give it the master or rehydration key.
 
-Read the full [security model, migration and recovery guide](docs/SECURITY.md) before deployment. `server.json` is source metadata only; no unverified package is advertised. See [release verification](docs/RELEASE.md).
+Read the full [security model, migration and recovery guide](docs/SECURITY.md) before deployment. `server.json` describes the verified PyPI package for MCP Registry publication; a registry listing requires a separate submission. See [release verification](docs/RELEASE.md).
 
 ## Verify and measure
 

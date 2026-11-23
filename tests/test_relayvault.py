@@ -542,9 +542,18 @@ def test_manifest_and_demo(tmp_path):
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     assert manifest["version"] == project["project"]["version"] == "0.2.0"
     assert "mcp-name: io.github.ranjitmani61/relayvault" in (ROOT / "README.md").read_text()
-    assert "packages" not in manifest  # Do not advertise an unpublished package.
+    assert manifest["$schema"] == "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json"
     assert manifest["name"] == "io.github.ranjitmani61/relayvault"
     assert manifest["repository"]["url"] == "https://github.com/ranjitmani61/relayvault"
+    assert len(manifest["packages"]) == 1
+    package = manifest["packages"][0]
+    assert package["registryType"] == "pypi"
+    assert package["registryBaseUrl"] == "https://pypi.org"
+    assert package["identifier"] == project["project"]["name"] == "relayvault"
+    assert package["version"] == manifest["version"]
+    assert package["runtimeHint"] == "uvx"
+    assert package["packageArguments"] == [{"type": "positional", "value": "serve-mcp"}]
+    assert package["transport"] == {"type": "stdio"}
     env = os.environ.copy()
     env["RELAYVAULT_HOME"] = str(tmp_path / "demo-home")
     env.pop("RELAYVAULT_DEMO_LIVE", None)
