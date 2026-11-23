@@ -11,7 +11,7 @@ from relayvault.engine import IntegrityError, RelayVaultEngine
 
 app = FastAPI(
     title="RelayVault Task Checkpoints & Pattern Redaction API",
-    version="0.1.0",
+    version="0.2.0",
     description=(
         "Git-like task state checkpointing and reversible local PII/secret vault for seamless handoffs "
         "across OpenAI (ChatGPT), Anthropic (Claude), Google (Gemini), xAI (Grok), DeepSeek, and Moonshot (Kimi)."
@@ -95,13 +95,13 @@ class CheckoutHandoffRequest(StrictRequest):
 class RehydrateRequest(StrictRequest):
     workspace_id: str = Field(..., description="Workspace identifier")
     text_with_vault_tokens: str = Field(
-        ..., description="Text or code containing <RV_VAULT:TYPE:HASH> tokens"
+        ..., description="Text or code containing RV_VAULT placeholder tokens"
     )
 
 
 @app.get("/health")
 def health_check() -> Dict[str, str]:
-    return {"status": "ok", "service": "relayvault", "version": "0.1.0"}
+    return {"status": "ok", "service": "relayvault", "version": "0.2.0"}
 
 
 @app.post("/v1/checkpoints/commit", dependencies=[Depends(verify_api_key)])

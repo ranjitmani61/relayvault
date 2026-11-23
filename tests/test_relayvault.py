@@ -540,7 +540,8 @@ def test_cli_dehydrate_rehydrate_preserves_original_bytes(vault, tmp_path):
 def test_manifest_and_demo(tmp_path):
     manifest = json.loads((ROOT / "server.json").read_text())
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    assert manifest["version"] == project["project"]["version"] == "0.1.0"
+    assert manifest["version"] == project["project"]["version"] == "0.2.0"
+    assert "mcp-name: io.github.ranjitmani61/relayvault" in (ROOT / "README.md").read_text()
     assert "packages" not in manifest  # Do not advertise an unpublished package.
     assert manifest["name"] == "io.github.ranjitmani61/relayvault"
     assert manifest["repository"]["url"] == "https://github.com/ranjitmani61/relayvault"
@@ -558,3 +559,23 @@ def test_manifest_and_demo(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.count("[VERIFIED]") >= 2
+
+
+def test_handoff_prompt_contains_no_malformed_vault_tokens(vault):
+    from relayvault.redaction import TOKEN_LIKE_RE, TOKEN_RE
+
+    vault.commit_checkpoint(
+        "prompt-clean",
+        "source-model",
+        "Notify ops@example.org",
+        [],
+        [],
+        {"config.py": "API = 'sk-proj-99887766554433221100aabbccddeeff'\n"},
+        [],
+    )
+    handoff = vault.checkout_handoff("prompt-clean")
+    prompt = handoff["synthesized_handoff_prompt"]
+    malformed = [m.group() for m in TOKEN_LIKE_RE.finditer(prompt) if not TOKEN_RE.fullmatch(m.group())]
+    assert malformed == []
+    restored, count = vault.rehydrate_text("prompt-clean", prompt)
+    assert count == 2 and "ops@example.org" in restored

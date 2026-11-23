@@ -1,7 +1,7 @@
 {
   "name": "io.github.ranjitmani61/relayvault",
   "description": "Source installation only; local encrypted task checkpoints and pattern redaction",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "repository": {
     "url": "https://github.com/ranjitmani61/relayvault",
     "source": "github"

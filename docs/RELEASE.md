@@ -17,3 +17,10 @@ pip-compile pyproject.toml --extra dev --generate-hashes --strip-extras --allow-
 ```
 
 For product validation, recruit users with a concrete handoff workflow and measure setup time, detector misses/false positives on consented workloads, cross-client task completion, and recovery success. These outcomes cannot be established by adding more synthetic unit tests.
+
+## Recorded live provider contracts
+
+| Date | Provider | Model | Outcome | Token preservation |
+| :--- | :--- | :--- | :--- | :--- |
+| 2026-11-23 | `openai` | `gpt-4o-mini` | Passed (`test_live_provider_contract`) | 4/4 synthetic tokens preserved and locally rehydrated |
+| 2026-11-23 | `deepseek` | `deepseek-chat` | Passed (`test_live_provider_contract`) | 4/4 synthetic tokens preserved and locally rehydrated |

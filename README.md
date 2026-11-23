@@ -1,5 +1,7 @@
 # RelayVault
 
+<!-- mcp-name: io.github.ranjitmani61/relayvault -->
+
 [![CI](https://github.com/ranjitmani61/relayvault/actions/workflows/ci.yml/badge.svg)](https://github.com/ranjitmani61/relayvault/actions/workflows/ci.yml)
 
 

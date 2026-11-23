@@ -110,7 +110,8 @@ async def main():
             },
             json={"workspace_id": workspace, "text_with_vault_tokens": output},
         )
-        response.raise_for_status()
+        if response.is_error:
+            raise RuntimeError(f"Rehydrate failed ({response.status_code}): {response.text}")
         restored = response.json()
         assert restored["tokens_rehydrated"] == 4
         assert all(value in restored["rehydrated_text"] for value in samples)

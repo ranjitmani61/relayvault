@@ -96,7 +96,7 @@ def relayvault_checkout_handoff(
 ) -> str:
     """
     Load the latest (or specific commit_hash) task state checkpoint from another AI model.
-    Returns structured state plus a synthesized handoff prompt with redacted <RV_VAULT:...> tokens intact.
+    Returns structured state plus a synthesized handoff prompt with redacted RV_VAULT tokens intact.
     """
     authorize(workspace_id, "read")
     result = engine.checkout_handoff(
@@ -112,7 +112,7 @@ def relayvault_checkout_handoff(
 
 def relayvault_rehydrate_output(workspace_id: str, text_with_vault_tokens: str) -> str:
     """
-    Locally replace <RV_VAULT:TYPE:HASH> placeholders in model-generated code or configs with real secrets.
+    Locally replace RV_VAULT placeholders in model-generated code or configs with real secrets.
     Only run this on your trusted local machine after receiving output from an external model.
     """
     if get_access_token() is not None:
