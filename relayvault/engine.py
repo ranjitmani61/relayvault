@@ -26,6 +26,11 @@ class ReviewRequired(ValueError):
     pass
 
 
+SAFE_CHECKPOINT_FIELDS = frozenset(
+    {"objective", "locked_decisions", "failed_approaches", "artifacts", "next_steps"}
+)
+
+
 def canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, ensure_ascii=True, allow_nan=False).encode("utf-8")
 
@@ -254,13 +259,13 @@ class RelayVaultEngine:
             "notice": "Detected patterns only; review unstructured PII and unrecognized secrets locally.",
         }
 
-    def redact_text(self, workspace_id: str, text: str, *, _conn=None):
+    def redact_text(self, workspace_id: str, text: str, *, _conn=None, _field: str | None = None):
         self.detector.validate_identifier(workspace_id, "workspace_id")
         if len(text.encode()) > 2_000_000:
             raise ValueError("Text exceeds the 2 MB limit")
         if _conn is None:
             with self._connect() as conn:
-                return self.redact_text(workspace_id, text, _conn=conn)
+                return self.redact_text(workspace_id, text, _conn=conn, _field=_field)
         for token in set(TOKEN_RE.findall(text)):
             row = _conn.execute(
                 "SELECT * FROM secret_vault WHERE workspace_id=? AND token_id=?", (workspace_id, token)
@@ -274,6 +279,11 @@ class RelayVaultEngine:
             masked = masked[: item.start] + " " * (item.end - item.start) + masked[item.end :]
         uncertain = self.detector.uncertain(masked)
         if uncertain and self.policy == "block-uncertain":
+            if _field:
+                raise ReviewRequired(
+                    f"Unclassified credential-like content in '{_field}'; "
+                    "add a detector, use workspace-relative paths, or use local review policy"
+                )
             raise ReviewRequired(
                 "Unclassified credential-like content; add a detector or use local review policy"
             )
@@ -284,17 +294,36 @@ class RelayVaultEngine:
             result = result[: item.start] + token + result[item.end :]
         return result, len(findings)
 
-    def _redact_structure(self, workspace_id: str, obj: Any, *, _conn=None):
+    def _redact_structure(self, workspace_id: str, obj: Any, *, _conn=None, _path: str | None = None):
         if isinstance(obj, str):
-            return self.redact_text(workspace_id, obj, _conn=_conn)
+            return self.redact_text(workspace_id, obj, _conn=_conn, _field=_path)
         if isinstance(obj, list):
-            values = [self._redact_structure(workspace_id, item, _conn=_conn) for item in obj]
+            values = [
+                self._redact_structure(
+                    workspace_id,
+                    item,
+                    _conn=_conn,
+                    _path=f"{_path}[{index}]" if _path else f"[{index}]",
+                )
+                for index, item in enumerate(obj)
+            ]
             return [v for v, _ in values], sum(n for _, n in values)
         if isinstance(obj, dict):
             result, count = {}, 0
-            for key, value in obj.items():
-                k, n = self.redact_text(workspace_id, key, _conn=_conn) if isinstance(key, str) else (key, 0)
-                v, m = self._redact_structure(workspace_id, value, _conn=_conn)
+            for index, (key, value) in enumerate(obj.items()):
+                if _path is None and isinstance(key, str) and key in SAFE_CHECKPOINT_FIELDS:
+                    key_field = key
+                    value_field = key
+                else:
+                    prefix = f"{_path}[{index}]" if _path else f"entry[{index}]"
+                    key_field = f"{prefix}.key"
+                    value_field = f"{prefix}.value"
+                k, n = (
+                    self.redact_text(workspace_id, key, _conn=_conn, _field=key_field)
+                    if isinstance(key, str)
+                    else (key, 0)
+                )
+                v, m = self._redact_structure(workspace_id, value, _conn=_conn, _path=value_field)
                 if k in result:
                     raise ValueError("Dictionary keys collide after redaction")
                 result[k], count = v, count + n + m
