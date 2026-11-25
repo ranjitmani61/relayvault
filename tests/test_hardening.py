@@ -1,18 +1,22 @@
 import asyncio
 import hashlib
 import json
+import math
 import os
+import re
 import socket
 import sqlite3
 import stat
 import subprocess
 import sys
+from collections import Counter
 from contextlib import asynccontextmanager
 
 import httpx
 import pytest
-from mcp import ClientSession
+from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
+from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import McpError
 from redaction_corpus import NEGATIVE, POSITIVE
@@ -81,6 +85,231 @@ def test_uncertain_blocks_and_preview_does_not_vault(vault):
     with sqlite3.connect(vault.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM secret_vault").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] == 0
+
+
+V020_TOKEN_RE = re.compile(r"<RV_VAULT:[A-Z0-9_]+:(?:v2_[0-9a-f]{32}|[0-9a-f]{10})>")
+V020_OPAQUE_RE = re.compile(r"(?<![\w])(?=[A-Za-z0-9_+/=-]{24,}(?![\w]))[A-Za-z0-9_+/=-]+")
+
+
+def _v020_shannon_entropy(data: str) -> float:
+    """Frozen v0.2.0 Shannon entropy reference (independent of production code)."""
+    return -sum((n / len(data)) * math.log2(n / len(data)) for n in Counter(data).values()) if data else 0.0
+
+
+def _v020_uncertain_spans(text: str) -> list[tuple[int, int]]:
+    """Frozen v0.2.0 Detector.uncertain() reference for differential regression checks."""
+    masked = V020_TOKEN_RE.sub(lambda m: " " * len(m.group()), text)
+    spans = []
+    for match in V020_OPAQUE_RE.finditer(masked):
+        value = match.group()
+        if re.fullmatch(r"[0-9a-fA-F]{32}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", value):
+            continue
+        if (
+            any(c.islower() for c in value)
+            and any(c.isupper() for c in value)
+            and any(c.isdigit() for c in value)
+            and _v020_shannon_entropy(value) >= 3.8
+        ):
+            spans.append(match.span())
+    return spans
+
+
+@pytest.mark.parametrize(
+    ("sample", "expect_flagged"),
+    [
+        # Original 5 slash-containing secret controls
+        ("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", True),
+        ("Ab3dEf9Gh2Jk5Lm8Np1Qr4St7Uv0Wx/YzA2Bc4De==", True),
+        ("/Users/alice/app/K9mP2xQ8vR4nL7wZ3cF6hT1jB5yN0dA8/config", True),
+        ("https://hooks.example.com/services/T0A9B8C7D/B1E2F3G4H/K9mP2xQ8vR4nL7wZ3cF6hT1jB5yN0dA8", True),
+        ("/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", True),
+        # Adversarial secrets disguised as POSIX paths (including segmented edge cases)
+        ("/Users/alice/keys/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", True),
+        ("/Users/alice/Ab3dEf9Gh2Jk5Lm8Np1Qr4St7Uv0Wx/YzA2Bc4De==", True),
+        ("/tmp/Ab3dEf9Gh2Jk5Lm8Np1Qr4St7Uv0Wx+YzA2Bc4De", True),
+        ("/Users/alice/aB3cD4/eF5gH6/iJ7kL8/mN9oP0", True),
+        ("/Users/alice/k9mp2xq8vr4nl7wz3cf6ht1jb5yn0da8", True),
+        ("/Users/alice/k9m2x8-v4n7w3-c6h1j5-y0d8a2", True),
+        ("/Users/alice/ab83/cd92/ef47/gh51", True),
+        ("/Users/alice/SecretKey94xQ/config", True),
+        ("//Users/alice/relayvault-p1-run/work/worker", True),
+        ("/Users/alice/relayvault-p1-run/x=K9mP2xQ8vR4nL7wZ3cF6hT1jB5yN0dA8", True),
+        # Absolute paths with mixed case and digits remain parity-matched with v0.2.0 (no path exemption)
+        ("/Users/alice/relayvault-p1-run/work/worker.py", True),
+        ("/Users/alice/relayvault-p1-run/fixture.env.rv", True),
+        ("/Users/alice/rv-cal-alpha/s2-claude-recv", False),
+        ("/Users/alice/rv-cal-alpha/s2-claude-recv/worker.py", True),
+        # Benign workspace-relative paths and ordinary identifiers
+        ("worker.py", False),
+        ("src/webhook/worker.py", False),
+        ("s2-claude-recv/worker.py", False),
+        ("work/sprint-2/relayvault-p1-run/worker.py", False),
+        ("fixture.env.rv", False),
+        ("sha256: b87efb97e1c71f8a06b828a6ca0aa1b2b2be5feb30b16593ff6955afcaac9460", False),
+    ],
+)
+def test_uncertain_detector_matches_v020_reference_differentially(vault, sample, expect_flagged):
+    expected = _v020_uncertain_spans(sample)
+    actual = [(f.start, f.end) for f in vault.detector.uncertain(sample)]
+    assert actual == expected
+    assert bool(actual) is expect_flagged
+
+
+def test_commit_checkpoint_allows_workspace_relative_artifact_paths(vault):
+    res = vault.commit_checkpoint(
+        workspace_id="test-workspace",
+        source_model="test-model",
+        objective="Implement stable ID repair",
+        locked_decisions=["Keep default at 2 attempts"],
+        failed_approaches=["Initial uuid4 inside loop"],
+        artifacts={
+            "worker.py": "MODIFIED. SHA-256 b87efb97e1c71f8a06b828a6ca0aa1b2b2be5feb30b16593ff6955afcaac9460",
+            "test_worker.py": "Unmodified. SHA-256 7b1337499433cb5fecde4443925d37f74601e9c0785107d610ee34a4173c7d25",
+            "public_test_status": "python3 -B -m unittest -v in work/s2-claude-recv: Ran 3 tests, OK",
+        },
+        next_steps=["Update default to 3"],
+    )
+    assert res["commit_hash"]
+
+
+def test_review_required_reports_safe_field_slots_without_leaking_values_or_keys(vault):
+    secret = "Zx9Qr2As5Df8Gh1Jk4Lp7Vb0Nm3Cu6Ty"
+
+    with pytest.raises(ReviewRequired) as exc_obj:
+        commit(vault, objective=f"token {secret}")
+    assert "in 'objective'" in str(exc_obj.value)
+    assert secret not in str(exc_obj.value)
+
+    with pytest.raises(ReviewRequired) as exc_dec:
+        commit(vault, locked_decisions=["safe decision", f"bad {secret}"])
+    assert "in 'locked_decisions[1]'" in str(exc_dec.value)
+    assert secret not in str(exc_dec.value)
+
+    with pytest.raises(ReviewRequired) as exc_key:
+        commit(vault, artifacts={secret: "safe value"})
+    assert "in 'artifacts[0].key'" in str(exc_key.value)
+    assert secret not in str(exc_key.value)
+
+    sensitive_key_name = "private_artifact_label"
+    with pytest.raises(ReviewRequired) as exc_val:
+        commit(
+            vault,
+            artifacts={
+                "first": "ok",
+                sensitive_key_name: "run in /Users/alice/rv-cal-alpha/s2-claude-recv/worker.py",
+            },
+        )
+    assert "in 'artifacts[1].value'" in str(exc_val.value)
+    assert sensitive_key_name not in str(exc_val.value)
+    assert "/Users/alice" not in str(exc_val.value)
+
+
+def test_review_required_rolls_back_earlier_redacted_secrets(vault):
+    structured_secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+    uncertain_secret = "Zx9Qr2As5Df8Gh1Jk4Lp7Vb0Nm3Cu6Ty"
+
+    with pytest.raises(ReviewRequired) as exc:
+        commit(
+            vault,
+            objective=f"earlier structured secret {structured_secret}",
+            artifacts={"first": "email demo@example.org", "second": f"opaque {uncertain_secret}"},
+        )
+    assert "in 'artifacts[1].value'" in str(exc.value)
+    assert structured_secret not in str(exc.value)
+    assert uncertain_secret not in str(exc.value)
+
+    with sqlite3.connect(vault.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM secret_vault").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] == 0
+    for file in vault.home.glob("relayvault.db*"):
+        raw = file.read_bytes()
+        assert structured_secret.encode() not in raw
+        assert uncertain_secret.encode() not in raw
+
+
+def test_mcp_commit_checkpoint_review_required_error_does_not_leak(tmp_path):
+    home = tmp_path / "mcp-home"
+    structured_secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+    uncertain_key_secret = "Zx9Qr2As5Df8Gh1Jk4Lp7Vb0Nm3Cu6Ty"
+    sensitive_key_name = "private_artifact_label"
+    ambiguous_path = "/Users/alice/rv-cal-alpha/s2-claude-recv/worker.py"
+
+    async def exercise():
+        env = dict(os.environ, RELAYVAULT_HOME=str(home))
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "relayvault.mcp_server", "--transport", "stdio"],
+            env=env,
+        )
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+
+                res_key = await session.call_tool(
+                    "relayvault_commit_checkpoint",
+                    arguments={
+                        "workspace_id": "test-workspace",
+                        "source_model": "test-model",
+                        "objective": f"key {structured_secret}",
+                        "locked_decisions": [],
+                        "failed_approaches": [],
+                        "artifacts": {uncertain_key_secret: "safe value"},
+                        "next_steps": [],
+                    },
+                )
+                assert res_key.isError is True
+                key_err = "\n".join(getattr(block, "text", "") for block in res_key.content)
+                assert "in 'artifacts[0].key'" in key_err
+                assert structured_secret not in key_err
+                assert uncertain_key_secret not in key_err
+
+                res_val = await session.call_tool(
+                    "relayvault_commit_checkpoint",
+                    arguments={
+                        "workspace_id": "test-workspace",
+                        "source_model": "test-model",
+                        "objective": f"key {structured_secret}",
+                        "locked_decisions": [],
+                        "failed_approaches": [],
+                        "artifacts": {"first": "ok", sensitive_key_name: f"tests in {ambiguous_path}"},
+                        "next_steps": [],
+                    },
+                )
+                assert res_val.isError is True
+                val_err = "\n".join(getattr(block, "text", "") for block in res_val.content)
+                assert "in 'artifacts[1].value'" in val_err
+                assert sensitive_key_name not in val_err
+                assert ambiguous_path not in val_err
+                assert structured_secret not in val_err
+
+    asyncio.run(exercise())
+
+    with sqlite3.connect(home / "relayvault.db") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM secret_vault").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0] == 0
+
+
+def test_local_review_policy_handles_ambiguous_absolute_path_fail_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("RELAYVAULT_HOME", str(tmp_path / "vault"))
+    monkeypatch.setenv("RELAYVAULT_REDACTION_POLICY", "review")
+    engine = RelayVaultEngine()
+    ambiguous_path = "/Users/alice/rv-cal-alpha/s2-claude-recv/worker.py"
+
+    committed = commit(engine, artifacts={"public_test_status": f"tests passed in {ambiguous_path}"})
+    assert committed["review_required"] is True
+
+    with pytest.raises(ReviewRequired):
+        engine.checkout_handoff("test-workspace")
+
+    local_state = engine.checkout_handoff("test-workspace", _local_review=True)
+    status_value = local_state["artifacts"]["public_test_status"]
+    assert "/Users/alice/rv-cal-alpha/s2-claude-recv" not in status_value
+    assert "<RV_VAULT:UNCLASSIFIED_CREDENTIAL:" in status_value
+
+    engine.approve_checkpoint("test-workspace", committed["commit_hash"])
+    exported = engine.checkout_handoff("test-workspace")
+    assert exported["reviewed"] is True
+    assert "/Users/alice/rv-cal-alpha/s2-claude-recv" not in exported["artifacts"]["public_test_status"]
 
 
 def test_custom_detector_and_local_review(vault, tmp_path, monkeypatch):
